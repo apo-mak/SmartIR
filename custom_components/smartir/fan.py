@@ -1,4 +1,5 @@
 import asyncio
+import aiofiles
 import json
 import logging
 import os.path
@@ -6,14 +7,12 @@ import os.path
 import voluptuous as vol
 
 from homeassistant.components.fan import (
-    FanEntity, PLATFORM_SCHEMA, ATTR_SPEED, 
-    SPEED_OFF, SPEED_LOW, SPEED_MEDIUM, SPEED_HIGH, 
-    DIRECTION_REVERSE, DIRECTION_FORWARD,
-    SUPPORT_SET_SPEED, SUPPORT_DIRECTION, SUPPORT_OSCILLATE, ATTR_OSCILLATING )
+    FanEntity, FanEntityFeature,
+    PLATFORM_SCHEMA, DIRECTION_REVERSE, DIRECTION_FORWARD)
 from homeassistant.const import (
     CONF_NAME, STATE_OFF, STATE_ON, STATE_UNKNOWN)
-from homeassistant.core import callback
-from homeassistant.helpers.event import async_track_state_change
+from homeassistant.core import Event, EventStateChangedData, callback
+from homeassistant.helpers.event import async_track_state_change, async_track_state_change_event
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util.percentage import (
@@ -33,6 +32,8 @@ CONF_DEVICE_CODE = 'device_code'
 CONF_CONTROLLER_DATA = "controller_data"
 CONF_DELAY = "delay"
 CONF_POWER_SENSOR = 'power_sensor'
+
+SPEED_OFF = "off"
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_UNIQUE_ID): cv.string,
@@ -72,12 +73,15 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
                           "place the file manually in the proper directory.")
             return
 
-    with open(device_json_path) as j:
-        try:
-            device_data = json.load(j)
-        except Exception:
-            _LOGGER.error("The device JSON file is invalid")
-            return
+    try:
+        async with aiofiles.open(device_json_path, mode='r') as j:
+            _LOGGER.debug(f"loading json file {device_json_path}")
+            content = await j.read()
+            device_data = json.loads(content)
+            _LOGGER.debug(f"{device_json_path} file loaded")
+    except Exception:
+        _LOGGER.error("The device JSON file is invalid")
+        return
 
     async_add_entities([SmartIRFan(
         hass, config, device_data
@@ -104,17 +108,20 @@ class SmartIRFan(FanEntity, RestoreEntity):
         self._direction = None
         self._last_on_speed = None
         self._oscillating = None
-        self._support_flags = SUPPORT_SET_SPEED
+        self._support_flags = (
+            FanEntityFeature.SET_SPEED
+            | FanEntityFeature.TURN_OFF
+            | FanEntityFeature.TURN_ON)
 
         if (DIRECTION_REVERSE in self._commands and \
             DIRECTION_FORWARD in self._commands):
             self._direction = DIRECTION_REVERSE
             self._support_flags = (
-                self._support_flags | SUPPORT_DIRECTION)
+                self._support_flags | FanEntityFeature.DIRECTION)
         if ('oscillate' in self._commands):
             self._oscillating = False
             self._support_flags = (
-                self._support_flags | SUPPORT_OSCILLATE)
+                self._support_flags | FanEntityFeature.OSCILLATE)
 
 
         self._temp_lock = asyncio.Lock()
@@ -141,15 +148,15 @@ class SmartIRFan(FanEntity, RestoreEntity):
             #If _direction has a value the direction controls appears 
             #in UI even if SUPPORT_DIRECTION is not provided in the flags
             if ('direction' in last_state.attributes and \
-                self._support_flags & SUPPORT_DIRECTION):
+                self._support_flags & FanEntityFeature.DIRECTION):
                 self._direction = last_state.attributes['direction']
 
             if 'last_on_speed' in last_state.attributes:
                 self._last_on_speed = last_state.attributes['last_on_speed']
 
             if self._power_sensor:
-                async_track_state_change(self.hass, self._power_sensor, 
-                                         self._async_power_sensor_changed)
+                async_track_state_change_event(self.hass, self._power_sensor, 
+                                               self._async_power_sensor_changed)
 
     @property
     def unique_id(self):
@@ -226,14 +233,14 @@ class SmartIRFan(FanEntity, RestoreEntity):
             self._last_on_speed = self._speed
 
         await self.send_command()
-        await self.async_update_ha_state()
+        self.async_write_ha_state()
 
     async def async_oscillate(self, oscillating: bool) -> None:
         """Set oscillation of the fan."""
         self._oscillating = oscillating
 
         await self.send_command()
-        await self.async_update_ha_state()
+        self.async_write_ha_state()
 
     async def async_set_direction(self, direction: str):
         """Set the direction of the fan"""
@@ -242,9 +249,9 @@ class SmartIRFan(FanEntity, RestoreEntity):
         if not self._speed.lower() == SPEED_OFF:
             await self.send_command()
 
-        await self.async_update_ha_state()
+        self.async_write_ha_state()
 
-    async def async_turn_on(self, percentage: int = None, **kwargs):
+    async def async_turn_on(self, percentage: int = None, preset_mode: str = None, **kwargs):
         """Turn on the fan."""
         if percentage is None:
             percentage = ordered_list_item_to_percentage(
@@ -275,8 +282,13 @@ class SmartIRFan(FanEntity, RestoreEntity):
             except Exception as e:
                 _LOGGER.exception(e)
 
-    async def _async_power_sensor_changed(self, entity_id, old_state, new_state):
+    @callback
+    async def _async_power_sensor_changed(self, event: Event[EventStateChangedData]) -> None:
         """Handle power sensor changes."""
+        entity_id = event.data["entity_id"]
+        old_state = event.data["old_state"]
+        new_state = event.data["new_state"]
+
         if new_state is None:
             return
 
@@ -286,10 +298,10 @@ class SmartIRFan(FanEntity, RestoreEntity):
         if new_state.state == STATE_ON and self._speed == SPEED_OFF:
             self._on_by_remote = True
             self._speed = None
-            await self.async_update_ha_state()
+            self.async_write_ha_state()
 
         if new_state.state == STATE_OFF:
             self._on_by_remote = False
             if self._speed != SPEED_OFF:
                 self._speed = SPEED_OFF
-            await self.async_update_ha_state()
+            self.async_write_ha_state()

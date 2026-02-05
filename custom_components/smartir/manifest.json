@@ -4,17 +4,18 @@
   "documentation": "https://github.com/smartHomeHub/SmartIR",
   "dependencies": [],
   "codeowners": ["@smartHomeHub"],
-  "requirements": ["aiofiles==0.6.0"],
-  "homeassistant": "2022.2.0",
-  "version": "1.17.5",
+  "requirements": ["aiofiles>=0.6.0"],
+  "homeassistant": "2025.5.0",
+  "version": "1.18.1",
   "updater": {
-    "version": "1.17.5",
-    "releaseNotes": "-- Compliance with the breaking change of the new fan model",
+    "version": "1.18.1",
+    "releaseNotes": "-- Implements new async_track_state_change_event",
     "files": [
       "__init__.py",
       "climate.py",
       "media_player.py",
       "fan.py",
+      "light.py",  
       "controller.py",
       "manifest.json",
       "services.yaml"
